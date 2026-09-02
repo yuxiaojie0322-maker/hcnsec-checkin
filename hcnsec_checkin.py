@@ -137,6 +137,30 @@ def get_checkin_status(cookie: str, uid: str):
     return stats.get("checked_in_today", False), stats
 
 
+def get_user_quota(cookie: str, uid: str):
+    """获取账户当前配额（原始 quota 数值）"""
+    data, code = api_request("GET", "/api/user/self", cookie=cookie, uid=uid)
+    if not data or not data.get("success"):
+        return None
+    return data.get("data", {}).get("quota")
+
+
+def format_quota_amount(quota):
+    """把原始 quota 换算为站点显示的金额（¥）。
+    站点前端规则: 金额 = quota / 500000 * 7.3（500000 quota=1 USD，USD→CNY 汇率 7.3）
+    例: 5,033,482,293 → ¥73,488.84
+    """
+    if quota is None:
+        return "?"
+    try:
+        quota = int(quota)
+    except (TypeError, ValueError):
+        return str(quota)
+    usd = quota / 500000
+    cny = usd * 7.3
+    return f"¥{cny:,.2f}"
+
+
 def do_checkin(cookie: str, uid: str):
     """执行签到，返回 (success, message, detail)"""
     data, code = api_request("POST", "/api/user/checkin", data={}, cookie=cookie, uid=uid)
@@ -172,19 +196,27 @@ def process_account(acc):
     if not cookie or not uid:
         return {"username": username, "ok": False, "msg": "登录失败"}
 
+    # 获取账户真实配额（换算为 ¥ 金额显示）
+    quota = get_user_quota(cookie, uid)
+    quota_str = format_quota_amount(quota)
+    print(f"[{username}] 账户配额: {quota_str} (原始 quota={quota})")
+
     # 先查状态
     checked_in, stats = get_checkin_status(cookie, uid)
     if checked_in:
         total = stats.get("total_checkins", "?")
-        total_q = stats.get("total_quota", 0)
-        total_q_str = f"{total_q/1000000:.1f}M" if total_q and total_q > 1000000 else f"{total_q:,}"
-        msg = "今日已签到（跳过）"
-        print(f"[{username}] {msg} | 累计{total}次, 总{total_q_str}")
-        return {"username": username, "ok": True, "msg": f"今日已签到 | 累计{total}次, 总{total_q_str}", "skipped": True}
+        msg = f"今日已签到 | 账户配额 {quota_str}"
+        print(f"[{username}] {msg} | 累计{total}次")
+        return {"username": username, "ok": True, "msg": msg, "skipped": True}
 
     # 执行签到
     ok, msg, detail = do_checkin(cookie, uid)
     print(f"[{username}] {msg}")
+    if ok and quota is not None:
+        # 签到后重新获取最新配额
+        new_quota = get_user_quota(cookie, uid)
+        new_str = format_quota_amount(new_quota)
+        msg = f"{msg} | 账户配额 {new_str}"
     return {"username": username, "ok": ok, "msg": msg}
 
 
