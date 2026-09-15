@@ -15,7 +15,7 @@ hcnsec.cn 每日登录签到脚本（多账号）
   HCN_BASE_URL               默认 https://api.hcnsec.cn
 
 使用示例:
-  HCN_ACCOUNTS="yxj0322:YxJ223512@|user2:pass2" python3 hcnsec_checkin.py
+  HCN_ACCOUNTS="your_username:your_password|user2:pass2" python3 hcnsec_checkin.py
 """
 
 import json
@@ -61,7 +61,7 @@ def parse_accounts(raw: str):
 
 
 def api_request(method: str, path: str, data=None, cookie=None, uid=None, timeout=30):
-    """发起 API 请求，返回 (json_dict, http_code)，失败返回 (None, code)"""
+    """发起 API 请求，返回 (json_dict, http_code, cookie_headers)"""
     url = BASE_URL.rstrip("/") + path
     headers = {
         "User-Agent": USER_AGENT,
@@ -76,48 +76,45 @@ def api_request(method: str, path: str, data=None, cookie=None, uid=None, timeou
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
+            cookie_headers = resp.headers.get_all("Set-Cookie") or []
             try:
-                return json.loads(text), resp.status
+                return json.loads(text), resp.status, cookie_headers
             except Exception:
-                return {"raw": text}, resp.status
+                return {"raw": text}, resp.status, cookie_headers
     except urllib.error.HTTPError as e:
+        cookie_headers = e.headers.get_all("Set-Cookie") or []
         try:
             text = e.read().decode("utf-8", errors="replace")
-            return json.loads(text), e.code
+            return json.loads(text), e.code, cookie_headers
         except Exception:
-            return {"raw": str(e)}, e.code
+            return {"raw": str(e)}, e.code, cookie_headers
     except Exception as e:
         print(f"[ERR] 请求异常 {method} {path}: {e}")
-        return None, -1
+        return None, -1, []
 
 
 def login(username: str, password: str):
     """登录，返回 (cookie, uid, display_name) 或 (None, None, None)"""
-    data, code = api_request("POST", "/api/user/login", {"username": username, "password": password})
+    data, code, cookie_headers = api_request("POST", "/api/user/login", {"username": username, "password": password})
     if not data or not data.get("success"):
         msg = (data or {}).get("message", f"HTTP {code}")
         print(f"[{username}] 登录失败: {msg}")
         return None, None, None
 
-    # 从响应头提取 session cookie
-    req = urllib.request.Request(
-        BASE_URL.rstrip("/") + "/api/user/login",
-        data=json.dumps({"username": username, "password": password}).encode("utf-8"),
-        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            session_cookie = ""
-            for k, v in resp.headers.items():
-                if k.lower() == "set-cookie" and "session=" in v:
-                    for part in v.split(","):
-                        if "session=" in part:
-                            session_cookie = "session=" + part.split("session=")[1].split(";")[0]
-                            break
-    except Exception as e:
-        print(f"[{username}] 获取 session cookie 失败: {e}")
-        return None, None, None
+    # 从响应头提取 session cookie (单次请求即可，避免重复登录)
+    session_cookie = ""
+    for v in cookie_headers:
+        if "session=" in v:
+            for part in v.split(";"):
+                part = part.strip()
+                if part.startswith("session="):
+                    session_cookie = part
+                    break
+            if session_cookie:
+                break
+
+    if not session_cookie:
+        print(f"[{username}] 警告: 未在登录响应中找到 session cookie")
 
     info = data.get("data", {})
     uid = info.get("id")
@@ -128,7 +125,7 @@ def login(username: str, password: str):
 
 def get_checkin_status(cookie: str, uid: str):
     """查询今日签到状态，返回 (checked_in_today, stats)"""
-    data, code = api_request("GET", "/api/user/checkin", cookie=cookie, uid=uid)
+    data, code, _ = api_request("GET", "/api/user/checkin", cookie=cookie, uid=uid)
     if not data or not data.get("success"):
         print(f"[uid={uid}] 查询签到状态失败: {(data or {}).get('message', f'HTTP {code}')}")
         return None, None
@@ -139,7 +136,7 @@ def get_checkin_status(cookie: str, uid: str):
 
 def get_user_quota(cookie: str, uid: str):
     """获取账户当前配额（原始 quota 数值）"""
-    data, code = api_request("GET", "/api/user/self", cookie=cookie, uid=uid)
+    data, code, _ = api_request("GET", "/api/user/self", cookie=cookie, uid=uid)
     if not data or not data.get("success"):
         return None
     return data.get("data", {}).get("quota")
@@ -163,7 +160,7 @@ def format_quota_amount(quota):
 
 def do_checkin(cookie: str, uid: str):
     """执行签到，返回 (success, message, detail)"""
-    data, code = api_request("POST", "/api/user/checkin", data={}, cookie=cookie, uid=uid)
+    data, code, _ = api_request("POST", "/api/user/checkin", data={}, cookie=cookie, uid=uid)
     if not data:
         return False, f"网络错误 HTTP {code}", None
     if data.get("success"):
