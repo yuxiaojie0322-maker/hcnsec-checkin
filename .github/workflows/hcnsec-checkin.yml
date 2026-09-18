@@ -18,8 +18,12 @@ jobs:
       contents: read
 
     steps:
-      - name: 检出代码
+      - name: 检出私有核心仓库
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/my-private-scripts
+          path: private-scripts
+          token: ${{ secrets.CORE_SCRIPT_TOKEN || secrets.REPO_TOKEN || secrets.GH_PAT_PRIVATE_REPO }}
 
       - name: 设置 Python
         uses: actions/setup-python@v5
@@ -32,7 +36,7 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          python hcnsec_checkin.py
+          python -u private-scripts/hcnsec/hcnsec_checkin.py
 
       - name: 🧹 清理旧的工作流运行记录（仅保留最新1条）
         if: always()
