@@ -1,0 +1,121 @@
+name: zz-diag
+
+on: [workflow_dispatch]
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出私有核心仓库
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/my-private-scripts
+          path: private-scripts
+          token: ${{ secrets.CORE_SCRIPT_TOKEN || secrets.REPO_TOKEN || secrets.GH_PAT_PRIVATE_REPO }}
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 探测新登录/签到接口
+        env:
+          HCN_ACCOUNTS: ${{ secrets.HCN_ACCOUNTS }}
+        run: |
+          cat > /tmp/probe.py << 'PYEOF'
+          import json, os
+          import urllib.request, urllib.error
+
+          BASE = "https://api.hcnsec.cn"
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+          raw = (os.environ.get("HCN_ACCOUNTS") or "").strip()
+          print("HCN_ACCOUNTS len:", len(raw), "| is_json:", raw.startswith("["))
+          accs = []
+          if raw.startswith("["):
+              for it in json.loads(raw):
+                  accs.append((str(it.get("username","")), str(it.get("password",""))))
+          else:
+              for seg in raw.split("|"):
+                  seg = seg.strip()
+                  if ":" in seg:
+                      u, _, p = seg.partition(":")
+                      accs.append((u.strip(), p.strip()))
+          print("账号数:", len(accs), "| 用户名:", [a[0] for a in accs])
+
+          def req(method, path, body=None, extra=None, ct="application/json", timeout=30):
+              url = BASE + path
+              h = {"User-Agent": UA, "Accept": "application/json"}
+              if ct:
+                  h["Content-Type"] = ct
+              if extra:
+                  h.update(extra)
+              if ct and body is not None:
+                  data = (json.dumps(body) if ct == "application/json" else body).encode("utf-8")
+              else:
+                  data = None
+              r = urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(r, timeout=timeout) as resp:
+                      t = resp.read().decode("utf-8", "replace")
+                      return resp.status, resp.headers, t
+              except urllib.error.HTTPError as e:
+                  t = e.read().decode("utf-8", "replace")
+                  return e.code, e.headers, t
+              except Exception as e:
+                  return -1, None, "EXC: %s" % e
+
+          def show(method, path, body=None, extra=None, ct="application/json", label=None):
+              print("\n### %s %s%s" % (label or "", method, path))
+              st, hd, t = req(method, path, body, extra, ct)
+              print("HTTP:", st)
+              if hd is not None:
+                  print("Set-Cookie:", hd.get_all("Set-Cookie"))
+                  keys = ("server","x-new-api-version","content-type","location","www-authenticate","x-oneapi-request-id")
+                  print("Headers:", {k: v for k, v in hd.items() if k.lower() in keys})
+              try:
+                  print("BODY:", json.dumps(json.loads(t), ensure_ascii=False)[:2500])
+              except Exception:
+                  print("BODY:", t[:2500])
+              return st, hd, t
+
+          u, p = accs[0]
+          print("\n========== [1] 账号1 登录探测 ==========")
+          st, hd, t = show("POST", "/api/user/login", {"username": u, "password": p})
+
+          # 收集所有 cookie
+          cookies = {}
+          sc = hd.get_all("Set-Cookie") if hd is not None else []
+          for v in (sc or []):
+              for part in v.split(";"):
+                  part = part.strip()
+                  if "=" in part:
+                      k, _, val = part.partition("=")
+                      cookies[k.strip()] = val.strip()
+          print("\n>>> 解析出的 cookie 名:", list(cookies.keys()))
+          cookie_str = "; ".join("%s=%s" % (k, v) for k, v in cookies.items())
+
+          print("\n========== [2] 带 cookie 探测 /api/user/self ==========")
+          show("GET", "/api/user/self", extra={"Cookie": cookie_str})
+
+          print("\n========== [3] 带 cookie 探测 /api/user/checkin ==========")
+          show("GET", "/api/user/checkin", extra={"Cookie": cookie_str})
+
+          print("\n========== [4] 带 cookie POST /api/user/checkin ==========")
+          show("POST", "/api/user/checkin", {}, extra={"Cookie": cookie_str})
+
+          # 探测可能的新 token 接口
+          print("\n========== [5] 候选新接口探测 ==========")
+          for m, path, body, ct in [
+              ("POST", "/api/user/auth/login", {"username": u, "password": p}, "application/json"),
+              ("POST", "/api/user/auth/token", {"username": u, "password": p}, "application/json"),
+              ("POST", "/api/user/auth/refresh", None, "application/json"),
+              ("POST", "/api/auth/login", {"username": u, "password": p}, "application/json"),
+              ("POST", "/api/user/login", "username=%s&password=%s" % (u, p), "application/x-www-form-urlencoded"),
+          ]:
+              show(m, path, body, ct=ct)
+
+          print("\nDONE")
+          PYEOF
+          python3 -u /tmp/probe.py
